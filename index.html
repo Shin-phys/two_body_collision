@@ -159,7 +159,7 @@
         const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
         // 物理定数
-        const SPRING_K = 50;
+        const SPRING_K = 5; // バネ定数を小さくして振動を見やすく
         const DT = 1 / 60;
 
         // トグルボタン
@@ -261,11 +261,17 @@
             const [v1, setV1] = useState(4);
             const [v2, setV2] = useState(0);
 
-            // 2Dモード用の固定速度
-            const v2d = useMemo(() => ({
-                p1: { vx: 3, vy: -2 },
-                p2: { vx: -2, vy: 1 }
-            }), []);
+            // 2Dモード用の固定速度（2パターン：両方y成分正 / y成分正負）
+            const [collisionPattern, setCollisionPattern] = useState(1);
+            const v2d = useMemo(() => {
+                if (collisionPattern === 1) {
+                    // パターン1: 両方y成分正（上向き）
+                    return { p1: { vx: 3, vy: 1 }, p2: { vx: -3, vy: 1 } };
+                } else {
+                    // パターン2: y成分正と負（交差）
+                    return { p1: { vx: 3, vy: -1 }, p2: { vx: -3, vy: 1 } };
+                }
+            }, [collisionPattern]);
 
             // カメラ制御
             const [cameraMag, setCameraMag] = useState(0); // Mode 2a: 大きさ
@@ -274,13 +280,14 @@
 
             const [playing, setPlaying] = useState(false);
             const [slowMo, setSlowMo] = useState(false);
+            const [restitution, setRestitution] = useState(1.0); // 反発係数 e
             const [showInfo, setShowInfo] = useState(false);
             const [time, setTime] = useState(0);
 
             const canvasRef = useRef(null);
             const graphRef = useRef(null);
             const stateRef = useRef(null);
-            const traceRef = useRef([]);
+            // traceRefを削除（青い軌跡線を除去）
             const energyHistRef = useRef([]);
             const animRef = useRef(null);
 
@@ -351,7 +358,6 @@
 
             // 初期状態設定
             const initState = useCallback(() => {
-                traceRef.current = [];
                 energyHistRef.current = [];
 
                 if (mode === 1) {
@@ -361,9 +367,13 @@
                         collided: false
                     };
                 } else if (mode === 2 || mode === 3) {
+                    // 確実に衝突する初期座標
+                    const initPos = collisionPattern === 1
+                        ? { p1: { x: -150, y: -60 }, p2: { x: 150, y: -60 } }  // 両方同じy座標
+                        : { p1: { x: -150, y: 60 }, p2: { x: 150, y: -60 } };  // y座標が逆
                     stateRef.current = {
-                        p1: { x: -180, y: 60, vx: v2d.p1.vx, vy: v2d.p1.vy, m: m1 },
-                        p2: { x: 180, y: -60, vx: v2d.p2.vx, vy: v2d.p2.vy, m: m2 },
+                        p1: { x: initPos.p1.x, y: initPos.p1.y, vx: v2d.p1.vx, vy: v2d.p1.vy, m: m1 },
+                        p2: { x: initPos.p2.x, y: initPos.p2.y, vx: v2d.p2.vx, vy: v2d.p2.vy, m: m2 },
                         collided: false
                     };
                 } else {
@@ -376,7 +386,7 @@
                     };
                 }
                 setTime(0);
-            }, [mode, m1, m2, m3, v1, v2, v2d]);
+            }, [mode, m1, m2, m3, v1, v2, v2d, collisionPattern]);
 
             const handleReset = () => {
                 setPlaying(false);
@@ -401,8 +411,10 @@
                     const r1 = 15 + s.p1.m * 5;
                     const r2 = 15 + s.p2.m * 5;
                     if (!s.collided && Math.abs(s.p1.x - s.p2.x) < r1 + r2) {
-                        const v1New = ((s.p1.m - s.p2.m) * s.p1.vx + 2 * s.p2.m * s.p2.vx) / (s.p1.m + s.p2.m);
-                        const v2New = ((s.p2.m - s.p1.m) * s.p2.vx + 2 * s.p1.m * s.p1.vx) / (s.p1.m + s.p2.m);
+                        // 反発係数を適用した弾性衝突
+                        const e = restitution;
+                        const v1New = ((s.p1.m - e * s.p2.m) * s.p1.vx + (1 + e) * s.p2.m * s.p2.vx) / (s.p1.m + s.p2.m);
+                        const v2New = ((s.p2.m - e * s.p1.m) * s.p2.vx + (1 + e) * s.p1.m * s.p1.vx) / (s.p1.m + s.p2.m);
                         s.p1.vx = v1New;
                         s.p2.vx = v2New;
                         s.collided = true;
@@ -428,7 +440,9 @@
                         const dvn = dvx * nx + dvy * ny;
 
                         if (dvn > 0) {
-                            const j = (2 * dvn) / (1 / s.p1.m + 1 / s.p2.m);
+                            // 反発係数を適用
+                            const e = restitution;
+                            const j = ((1 + e) * dvn) / (1 / s.p1.m + 1 / s.p2.m);
                             s.p1.vx -= j * nx / s.p1.m;
                             s.p1.vy -= j * ny / s.p1.m;
                             s.p2.vx += j * nx / s.p2.m;
@@ -441,9 +455,22 @@
                     if (!s.merged) {
                         s.p1.x += s.p1.vx * scale;
                         if (Math.abs(s.p1.x - s.p2.x) < 30) {
-                            const totalM = s.p1.m + s.p2.originalM;
-                            s.p2.vx = (s.p1.m * s.p1.vx + s.p2.originalM * s.p2.vx) / totalM;
-                            s.p2.m = totalM;
+                            // A-B衝突（反発係数適用）
+                            const e = restitution;
+                            if (e === 0) {
+                                // 完全非弾性衝突（合体）
+                                const totalM = s.p1.m + s.p2.originalM;
+                                s.p2.vx = (s.p1.m * s.p1.vx + s.p2.originalM * s.p2.vx) / totalM;
+                                s.p2.m = totalM;
+                            } else {
+                                // 弾性衝突（反発係数あり）
+                                const totalM = s.p1.m + s.p2.originalM;
+                                const v1New = ((s.p1.m - e * s.p2.originalM) * s.p1.vx + (1 + e) * s.p2.originalM * s.p2.vx) / totalM;
+                                const v2New = ((s.p2.originalM - e * s.p1.m) * s.p2.vx + (1 + e) * s.p1.m * s.p1.vx) / totalM;
+                                // バネ系では合体のため、反発係数に関係なく合体
+                                s.p2.vx = (s.p1.m * s.p1.vx + s.p2.originalM * s.p2.vx) / totalM;
+                                s.p2.m = totalM;
+                            }
                             s.p1.x = -9999;
                             s.merged = true;
                         }
@@ -473,13 +500,7 @@
                     }
                 }
 
-                // 軌跡追加
-                const trace = [];
-                if (s.p1 && s.p1.x > -9000) trace.push({ x: s.p1.x, y: s.p1.y || 0, id: 1 });
-                if (s.p2) trace.push({ x: s.p2.x, y: s.p2.y || 0, id: 2 });
-                if (s.p3) trace.push({ x: s.p3.x, y: s.p3.y || 0, id: 3 });
-                traceRef.current.push(trace);
-                if (traceRef.current.length > 120) traceRef.current.shift();
+                // 軌跡は削除（青いノイズ線除去のため）
 
                 // エネルギー計算
                 let kTotal = 0, kRel = 0, uSpring = 0;
@@ -502,7 +523,7 @@
 
                 energyHistRef.current.push({ kTotal: kTotal / 10, kRel: kRel / 10, uSpring: uSpring / 100 });
                 if (energyHistRef.current.length > 200) energyHistRef.current.shift();
-            }, [mode, calcVg]);
+            }, [mode, calcVg, restitution]);
 
             // 描画
             const draw = useCallback(() => {
@@ -541,30 +562,8 @@
                     ctx.stroke();
                 }
 
-                // 軌跡描画
-                const colors = ['#f472b6', '#38bdf8', '#4ade80'];
-                for (let id = 1; id <= 3; id++) {
-                    ctx.beginPath();
-                    let started = false;
-                    traceRef.current.forEach((frame, i) => {
-                        const p = frame.find(pp => pp.id === id);
-                        if (p) {
-                            const px = offsetX + p.x;
-                            const py = offsetY + p.y;
-                            if (!started) {
-                                ctx.moveTo(px, py);
-                                started = true;
-                            } else {
-                                ctx.lineTo(px, py);
-                            }
-                        }
-                    });
-                    ctx.strokeStyle = colors[id - 1];
-                    ctx.globalAlpha = 0.4;
-                    ctx.lineWidth = 2;
-                    ctx.stroke();
-                    ctx.globalAlpha = 1;
-                }
+
+                // 軌跡描画は削除（青い線ノイズ除去）
 
                 // 粒子描画関数
                 const drawParticle = (p, color, label) => {
@@ -839,10 +838,37 @@
                                         </>
                                     )}
                                     {(mode === 2 || mode === 3) && (
-                                        <div className="text-xs text-slate-400 p-2 bg-slate-800 rounded">
-                                            固定速度: A=(3, -2), B=(-2, 1) m/s
-                                        </div>
+                                        <>
+                                            <ToggleGroup
+                                                label="衝突パターン"
+                                                options={[1, 2]}
+                                                value={collisionPattern}
+                                                onChange={setCollisionPattern}
+                                            />
+                                            <div className="text-xs text-slate-400 p-2 bg-slate-800 rounded">
+                                                {collisionPattern === 1
+                                                    ? '両方上向き: A=(3, 1), B=(-3, 1) m/s'
+                                                    : '交差: A=(3, -1), B=(-3, 1) m/s'}
+                                            </div>
+                                        </>
                                     )}
+                                    {/* 反発係数 */}
+                                    <div className="mb-2">
+                                        <div className="text-xs text-slate-400 mb-1">反発係数 e = {restitution.toFixed(1)}</div>
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={1}
+                                            step={0.1}
+                                            value={restitution}
+                                            onChange={(e) => setRestitution(parseFloat(e.target.value))}
+                                            className="slider-track"
+                                        />
+                                        <div className="flex justify-between text-xs text-slate-500 mt-1">
+                                            <span>非弾性</span>
+                                            <span>完全弾性</span>
+                                        </div>
+                                    </div>
                                 </div>
 
                                 {/* カメラ制御 */}
