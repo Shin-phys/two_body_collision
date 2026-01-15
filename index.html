@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>重心系・相対運動ビジュアライザー</title>
+    <meta name="description" content="物理教育用シミュレーター：重心系と相対運動を視覚的に学ぶ">
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { 
+            margin: 0; 
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+        }
+        .glass {
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+        }
+        .toggle-btn {
+            transition: all 0.2s ease;
+        }
+        .toggle-btn.active {
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.5);
+        }
+        .snap-point {
+            position: absolute;
+            width: 3px;
+            height: 12px;
+            background: #94a3b8;
+            border-radius: 2px;
+            transform: translateX(-50%);
+        }
+        .snap-label {
+            position: absolute;
+            font-size: 10px;
+            color: #94a3b8;
+            transform: translateX(-50%);
+            white-space: nowrap;
+        }
+        canvas { display: block; }
+        .particle-1 { background: #f472b6; }
+        .particle-2 { background: #38bdf8; }
+        .particle-3 { background: #4ade80; }
+        .energy-bar {
+            height: 8px;
+            border-radius: 4px;
+            transition: width 0.1s ease;
+        }
+        .slider-track {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 8px;
+            background: #334155;
+            border-radius: 4px;
+            outline: none;
+        }
+        .slider-track::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .pulse { animation: pulse 2s infinite; }
+        .info-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(8px);
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // 物理定数
+        const SPRING_K = 50; // バネ定数
+        const DT = 1/60;     // タイムステップ
+
+        // トグルボタンコンポーネント
+        const ToggleGroup = ({ label, options, value, onChange }) => (
+            <div className="mb-3">
+                <div className="text-xs text-slate-400 mb-1">{label}</div>
+                <div className="flex gap-1">
+                    {options.map(opt => (
+                        <button
+                            key={opt}
+                            onClick={() => onChange(opt)}
+                            className={`toggle-btn px-3 py-1.5 rounded text-sm font-medium ${
+                                value === opt ? 'active text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            }`}
+                        >
+                            {opt}
+                        </button>
+                    ))}
+                </div>
+            </div>
+        );
+
+        // スナップスライダー
+        const SnapSlider = ({ value, onChange, snapPoints, min, max }) => {
+            const handleChange = (e) => {
+                let newVal = parseFloat(e.target.value);
+                // スナップ処理
+                for (const sp of snapPoints) {
+                    if (Math.abs(newVal - sp.value) < (max - min) * 0.05) {
+                        newVal = sp.value;
+                        break;
+                    }
+                }
+                onChange(newVal);
+            };
+
+            return (
+                <div className="relative pt-6 pb-2">
+                    <div className="relative h-3">
+                        {snapPoints.map((sp, i) => (
+                            <React.Fragment key={i}>
+                                <div 
+                                    className="snap-point top-0"
+                                    style={{ left: `${((sp.value - min) / (max - min)) * 100}%` }}
+                                />
+                                <div 
+                                    className="snap-label"
+                                    style={{ left: `${((sp.value - min) / (max - min)) * 100}%`, top: '-18px' }}
+                                >
+                                    {sp.label}
+                                </div>
+                            </React.Fragment>
+                        ))}
+                    </div>
+                    <input
+                        type="range"
+                        min={min}
+                        max={max}
+                        step={0.1}
+                        value={value}
+                        onChange={handleChange}
+                        className="slider-track mt-1"
+                    />
+                </div>
+            );
+        };
+
+        // エネルギーバー
+        const EnergyBar = ({ label, value, maxValue, color }) => (
+            <div className="mb-2">
+                <div className="flex justify-between text-xs text-slate-400 mb-1">
+                    <span>{label}</span>
+                    <span>{value.toFixed(1)} J</span>
+                </div>
+                <div className="h-2 bg-slate-700 rounded overflow-hidden">
+                    <div 
+                        className="energy-bar"
+                        style={{ 
+                            width: `${Math.min(100, (value / maxValue) * 100)}%`,
+                            background: color 
+                        }}
+                    />
+                </div>
+            </div>
+        );
+
+        // メインアプリ
+        const App = () => {
+            const [mode, setMode] = useState(1);
+            const [m1, setM1] = useState(2);
+            const [m2, setM2] = useState(1);
+            const [m3, setM3] = useState(1);
+            const [v1, setV1] = useState(4);
+            const [v2, setV2] = useState(0);
+            const [impactB, setImpactB] = useState(0);
+            const [cameraV, setCameraV] = useState(0);
+            const [playing, setPlaying] = useState(false);
+            const [slowMo, setSlowMo] = useState(false);
+            const [autoScale, setAutoScale] = useState(true);
+            const [alignRelV, setAlignRelV] = useState(false);
+            const [showInfo, setShowInfo] = useState(false);
+            const [time, setTime] = useState(0);
+            
+            const canvasRef = useRef(null);
+            const graphRef = useRef(null);
+            const stateRef = useRef(null);
+            const traceRef = useRef([]);
+            const energyHistRef = useRef([]);
+            const animRef = useRef(null);
+
+            // 重心速度計算
+            const calcVg = useCallback(() => {
+                if (mode === 3) {
+                    return (m1 * v1) / (m1 + m2 + m3);
+                }
+                return (m1 * v1 + m2 * v2) / (m1 + m2);
+            }, [mode, m1, m2, m3, v1, v2]);
+
+            // スナップポイント生成
+            const getSnapPoints = useCallback(() => {
+                const vg = calcVg();
+                const points = [
+                    { value: 0, label: 'V=0' },
+                    { value: vg, label: `VG=${vg.toFixed(1)}` }
+                ];
+                if (v1 !== 0) points.push({ value: v1, label: `v₁=${v1}` });
+                if (v2 !== 0 && mode !== 3) points.push({ value: v2, label: `v₂=${v2}` });
+                return points.sort((a, b) => a.value - b.value);
+            }, [calcVg, v1, v2, mode]);
+
+            // 初期状態設定
+            const initState = useCallback(() => {
+                traceRef.current = [];
+                energyHistRef.current = [];
+                
+                if (mode === 1) {
+                    // 1D衝突
+                    stateRef.current = {
+                        p1: { x: -150, y: 0, vx: v1, vy: 0, m: m1 },
+                        p2: { x: 150, y: 0, vx: v2, vy: 0, m: m2 },
+                        collided: false
+                    };
+                } else if (mode === 2) {
+                    // 2D衝突
+                    stateRef.current = {
+                        p1: { x: -200, y: impactB * 30, vx: v1, vy: 0, m: m1 },
+                        p2: { x: 200, y: 0, vx: -v2, vy: 0, m: m2 },
+                        collided: false
+                    };
+                } else {
+                    // バネ系 (Mode 3)
+                    stateRef.current = {
+                        p1: { x: -200, y: 0, vx: v1, vy: 0, m: m1 },
+                        p2: { x: 0, y: 0, vx: 0, vy: 0, m: m2 },
+                        p3: { x: 100, y: 0, vx: 0, vy: 0, m: m3 },
+                        merged: false,
+                        springRest: 100
+                    };
+                }
+                setTime(0);
+            }, [mode, m1, m2, m3, v1, v2, impactB]);
+
+            // リセット
+            const handleReset = () => {
+                setPlaying(false);
+                initState();
+            };
+
+            useEffect(() => {
+                initState();
+            }, [initState]);
+
+            // 物理更新
+            const updatePhysics = useCallback((dt) => {
+                const s = stateRef.current;
+                if (!s) return;
+
+                if (mode === 1) {
+                    // 1D衝突
+                    s.p1.x += s.p1.vx * dt * 60;
+                    s.p2.x += s.p2.vx * dt * 60;
+                    
+                    // 衝突判定
+                    const r1 = 15 + s.p1.m * 5;
+                    const r2 = 15 + s.p2.m * 5;
+                    if (!s.collided && Math.abs(s.p1.x - s.p2.x) < r1 + r2) {
+                        // 弾性衝突
+                        const v1New = ((s.p1.m - s.p2.m) * s.p1.vx + 2 * s.p2.m * s.p2.vx) / (s.p1.m + s.p2.m);
+                        const v2New = ((s.p2.m - s.p1.m) * s.p2.vx + 2 * s.p1.m * s.p1.vx) / (s.p1.m + s.p2.m);
+                        s.p1.vx = v1New;
+                        s.p2.vx = v2New;
+                        s.collided = true;
+                    }
+                } else if (mode === 2) {
+                    // 2D衝突
+                    s.p1.x += s.p1.vx * dt * 60;
+                    s.p1.y += s.p1.vy * dt * 60;
+                    s.p2.x += s.p2.vx * dt * 60;
+                    s.p2.y += s.p2.vy * dt * 60;
+                    
+                    const dx = s.p2.x - s.p1.x;
+                    const dy = s.p2.y - s.p1.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const r1 = 15 + s.p1.m * 5;
+                    const r2 = 15 + s.p2.m * 5;
+                    
+                    if (!s.collided && dist < r1 + r2) {
+                        // 2D弾性衝突
+                        const nx = dx / dist;
+                        const ny = dy / dist;
+                        const dvx = s.p1.vx - s.p2.vx;
+                        const dvy = s.p1.vy - s.p2.vy;
+                        const dvn = dvx * nx + dvy * ny;
+                        
+                        const j = (2 * dvn) / (1/s.p1.m + 1/s.p2.m);
+                        s.p1.vx -= j * nx / s.p1.m;
+                        s.p1.vy -= j * ny / s.p1.m;
+                        s.p2.vx += j * nx / s.p2.m;
+                        s.p2.vy += j * ny / s.p2.m;
+                        s.collided = true;
+                    }
+                } else {
+                    // Mode 3: バネ系 (Velocity Verlet)
+                    // 衝突・合体判定
+                    if (!s.merged) {
+                        s.p1.x += s.p1.vx * dt * 60;
+                        const dist = Math.abs(s.p1.x - s.p2.x);
+                        if (dist < 30) {
+                            // 合体（完全非弾性衝突）
+                            const totalM = s.p1.m + s.p2.m;
+                            s.p2.vx = (s.p1.m * s.p1.vx + s.p2.m * s.p2.vx) / totalM;
+                            s.p2.m = totalM;
+                            s.p1.x = -9999; // 画面外へ
+                            s.merged = true;
+                        }
+                    }
+                    
+                    if (s.merged) {
+                        // バネ力計算 (p2-p3間)
+                        const stretch = (s.p3.x - s.p2.x) - s.springRest;
+                        const F = -SPRING_K * stretch;
+                        
+                        // Velocity Verlet
+                        const a2 = -F / s.p2.m;
+                        const a3 = F / s.p3.m;
+                        
+                        s.p2.x += s.p2.vx * dt * 60 + 0.5 * a2 * dt * dt * 3600;
+                        s.p3.x += s.p3.vx * dt * 60 + 0.5 * a3 * dt * dt * 3600;
+                        
+                        const newStretch = (s.p3.x - s.p2.x) - s.springRest;
+                        const newF = -SPRING_K * newStretch;
+                        const newA2 = -newF / s.p2.m;
+                        const newA3 = newF / s.p3.m;
+                        
+                        s.p2.vx += 0.5 * (a2 + newA2) * dt * 60;
+                        s.p3.vx += 0.5 * (a3 + newA3) * dt * 60;
+                    }
+                }
+
+                // 軌跡追加
+                const trace = [];
+                if (s.p1 && s.p1.x > -9000) trace.push({ x: s.p1.x, y: s.p1.y || 0, id: 1 });
+                if (s.p2) trace.push({ x: s.p2.x, y: s.p2.y || 0, id: 2 });
+                if (s.p3) trace.push({ x: s.p3.x, y: s.p3.y || 0, id: 3 });
+                traceRef.current.push(trace);
+                if (traceRef.current.length > 120) traceRef.current.shift();
+
+                // エネルギー計算
+                let kTotal = 0, kRel = 0, uSpring = 0;
+                const vg = calcVg();
+                
+                if (mode === 3 && s.merged) {
+                    kTotal = 0.5 * s.p2.m * s.p2.vx * s.p2.vx + 0.5 * s.p3.m * s.p3.vx * s.p3.vx;
+                    const stretch = (s.p3.x - s.p2.x) - s.springRest;
+                    uSpring = 0.5 * SPRING_K * stretch * stretch;
+                    const vcm = (s.p2.m * s.p2.vx + s.p3.m * s.p3.vx) / (s.p2.m + s.p3.m);
+                    kRel = 0.5 * s.p2.m * (s.p2.vx - vcm) ** 2 + 0.5 * s.p3.m * (s.p3.vx - vcm) ** 2;
+                } else if (s.p1 && s.p2) {
+                    kTotal = 0.5 * s.p1.m * (s.p1.vx ** 2 + (s.p1.vy || 0) ** 2)
+                           + 0.5 * s.p2.m * (s.p2.vx ** 2 + (s.p2.vy || 0) ** 2);
+                    kRel = 0.5 * s.p1.m * ((s.p1.vx - vg) ** 2)
+                         + 0.5 * s.p2.m * ((s.p2.vx - vg) ** 2);
+                }
+                
+                energyHistRef.current.push({ kTotal: kTotal / 10, kRel: kRel / 10, uSpring: uSpring / 100 });
+                if (energyHistRef.current.length > 200) energyHistRef.current.shift();
+
+            }, [mode, calcVg]);
+
+            // 描画
+            const draw = useCallback(() => {
+                const canvas = canvasRef.current;
+                const ctx = canvas?.getContext('2d');
+                if (!ctx || !stateRef.current) return;
+
+                const w = canvas.width;
+                const h = canvas.height;
+                const s = stateRef.current;
+
+                // クリア
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(0, 0, w, h);
+
+                // カメラオフセット
+                let offsetX = w / 2 - cameraV * time * 60;
+                
+                // 2Dモードで相対速度整列
+                let rotation = 0;
+                if (mode === 2 && alignRelV && s.p1 && s.p2) {
+                    const relVx = s.p1.vx - s.p2.vx;
+                    const relVy = (s.p1.vy || 0) - (s.p2.vy || 0);
+                    rotation = -Math.atan2(relVy, relVx);
+                }
+
+                ctx.save();
+                ctx.translate(w/2, h/2);
+                ctx.rotate(rotation);
+                ctx.translate(-w/2, -h/2);
+
+                // 動的グリッド
+                ctx.strokeStyle = 'rgba(148, 163, 184, 0.15)';
+                ctx.lineWidth = 1;
+                const gridSize = 50;
+                const gridOffset = (offsetX % gridSize + gridSize) % gridSize;
+                
+                for (let x = gridOffset; x < w; x += gridSize) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, h);
+                    ctx.stroke();
+                }
+                for (let y = 0; y < h; y += gridSize) {
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(w, y);
+                    ctx.stroke();
+                }
+
+                // 軌跡描画
+                const colors = ['#f472b6', '#38bdf8', '#4ade80'];
+                for (let id = 1; id <= 3; id++) {
+                    ctx.beginPath();
+                    let started = false;
+                    traceRef.current.forEach((frame, i) => {
+                        const p = frame.find(pp => pp.id === id);
+                        if (p) {
+                            const px = offsetX + p.x;
+                            const py = h/2 + p.y;
+                            const alpha = i / traceRef.current.length * 0.5;
+                            ctx.strokeStyle = colors[id-1].replace(')', `, ${alpha})`).replace('rgb', 'rgba');
+                            if (!started) {
+                                ctx.moveTo(px, py);
+                                started = true;
+                            } else {
+                                ctx.lineTo(px, py);
+                            }
+                        }
+                    });
+                    ctx.stroke();
+                }
+
+                // 粒子描画関数
+                const drawParticle = (p, color, label) => {
+                    if (!p || p.x < -9000) return;
+                    const px = offsetX + p.x;
+                    const py = h/2 + (p.y || 0);
+                    const r = 15 + p.m * 5;
+
+                    // 粒子本体
+                    const grad = ctx.createRadialGradient(px, py, 0, px, py, r);
+                    grad.addColorStop(0, color);
+                    grad.addColorStop(1, color.replace(')', ', 0.3)').replace('rgb', 'rgba'));
+                    ctx.beginPath();
+                    ctx.arc(px, py, r, 0, Math.PI * 2);
+                    ctx.fillStyle = grad;
+                    ctx.fill();
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // ラベル
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 12px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(label, px, py + 4);
+
+                    // 速度ベクトル
+                    if (p.vx !== 0 || (p.vy && p.vy !== 0)) {
+                        const vScale = 8;
+                        const vx = p.vx * vScale;
+                        const vy = (p.vy || 0) * vScale;
+                        ctx.beginPath();
+                        ctx.moveTo(px, py);
+                        ctx.lineTo(px + vx, py + vy);
+                        ctx.strokeStyle = '#fbbf24';
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                        // 矢印
+                        const angle = Math.atan2(vy, vx);
+                        ctx.beginPath();
+                        ctx.moveTo(px + vx, py + vy);
+                        ctx.lineTo(px + vx - 8 * Math.cos(angle - 0.4), py + vy - 8 * Math.sin(angle - 0.4));
+                        ctx.lineTo(px + vx - 8 * Math.cos(angle + 0.4), py + vy - 8 * Math.sin(angle + 0.4));
+                        ctx.closePath();
+                        ctx.fillStyle = '#fbbf24';
+                        ctx.fill();
+                    }
+                };
+
+                // 粒子描画
+                drawParticle(s.p1, 'rgb(244, 114, 182)', 'A');
+                drawParticle(s.p2, 'rgb(56, 189, 248)', 'B');
+                if (s.p3) drawParticle(s.p3, 'rgb(74, 222, 128)', 'C');
+
+                // バネ描画 (Mode 3)
+                if (mode === 3 && s.p2 && s.p3) {
+                    const x1 = offsetX + s.p2.x + 20;
+                    const x2 = offsetX + s.p3.x - 20;
+                    const y = h/2;
+                    ctx.beginPath();
+                    ctx.moveTo(x1, y);
+                    const coils = 8;
+                    const amp = 10;
+                    for (let i = 0; i <= coils; i++) {
+                        const t = i / coils;
+                        const x = x1 + (x2 - x1) * t;
+                        const yOff = (i % 2 === 0 ? 1 : -1) * amp * (i > 0 && i < coils ? 1 : 0);
+                        ctx.lineTo(x, y + yOff);
+                    }
+                    ctx.strokeStyle = '#a78bfa';
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                }
+
+                // 重心マーカー
+                const cmX = (() => {
+                    if (mode === 3) {
+                        if (s.merged) {
+                            return (s.p2.m * s.p2.x + s.p3.m * s.p3.x) / (s.p2.m + s.p3.m);
+                        }
+                        return (s.p1.m * s.p1.x + s.p2.m * s.p2.x + s.p3.m * s.p3.x) / (s.p1.m + s.p2.m + s.p3.m);
+                    }
+                    return (s.p1.m * s.p1.x + s.p2.m * s.p2.x) / (s.p1.m + s.p2.m);
+                })();
+                
+                ctx.beginPath();
+                ctx.moveTo(offsetX + cmX - 10, h/2);
+                ctx.lineTo(offsetX + cmX + 10, h/2);
+                ctx.moveTo(offsetX + cmX, h/2 - 10);
+                ctx.lineTo(offsetX + cmX, h/2 + 10);
+                ctx.strokeStyle = '#facc15';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+                ctx.font = '10px sans-serif';
+                ctx.fillStyle = '#facc15';
+                ctx.fillText('CM', offsetX + cmX + 15, h/2 - 5);
+
+                ctx.restore();
+
+                // エネルギーグラフ
+                const gCanvas = graphRef.current;
+                const gCtx = gCanvas?.getContext('2d');
+                if (gCtx) {
+                    const gw = gCanvas.width;
+                    const gh = gCanvas.height;
+                    gCtx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+                    gCtx.fillRect(0, 0, gw, gh);
+                    
+                    const hist = energyHistRef.current;
+                    const maxE = Math.max(10, ...hist.map(h => Math.max(h.kTotal, h.kRel, h.uSpring)));
+                    
+                    const drawLine = (key, color) => {
+                        gCtx.beginPath();
+                        hist.forEach((h, i) => {
+                            const x = (i / 200) * gw;
+                            const y = gh - (h[key] / maxE) * gh * 0.9;
+                            if (i === 0) gCtx.moveTo(x, y);
+                            else gCtx.lineTo(x, y);
+                        });
+                        gCtx.strokeStyle = color;
+                        gCtx.lineWidth = 2;
+                        gCtx.stroke();
+                    };
+                    
+                    drawLine('kTotal', '#f472b6');
+                    drawLine('kRel', '#38bdf8');
+                    if (mode === 3) drawLine('uSpring', '#a78bfa');
+                    
+                    // 凡例
+                    gCtx.font = '10px sans-serif';
+                    gCtx.fillStyle = '#f472b6';
+                    gCtx.fillText('K total', 5, 12);
+                    gCtx.fillStyle = '#38bdf8';
+                    gCtx.fillText('K rel', 55, 12);
+                    if (mode === 3) {
+                        gCtx.fillStyle = '#a78bfa';
+                        gCtx.fillText('U spring', 95, 12);
+                    }
+                }
+            }, [cameraV, time, mode, alignRelV]);
+
+            // アニメーションループ
+            useEffect(() => {
+                if (!playing) return;
+                
+                const loop = () => {
+                    const dt = slowMo ? DT * 0.5 : DT;
+                    updatePhysics(dt);
+                    setTime(t => t + dt);
+                    draw();
+                    animRef.current = requestAnimationFrame(loop);
+                };
+                
+                animRef.current = requestAnimationFrame(loop);
+                return () => cancelAnimationFrame(animRef.current);
+            }, [playing, slowMo, updatePhysics, draw]);
+
+            // 初期描画
+            useEffect(() => {
+                draw();
+            }, [draw, cameraV]);
+
+            // キャンバスリサイズ
+            useEffect(() => {
+                const resize = () => {
+                    const canvas = canvasRef.current;
+                    const graph = graphRef.current;
+                    if (canvas) {
+                        const container = canvas.parentElement;
+                        canvas.width = container.clientWidth;
+                        canvas.height = container.clientHeight;
+                    }
+                    if (graph) {
+                        graph.width = graph.parentElement.clientWidth;
+                        graph.height = 80;
+                    }
+                    draw();
+                };
+                resize();
+                window.addEventListener('resize', resize);
+                return () => window.removeEventListener('resize', resize);
+            }, [draw]);
+
+            // 現在のエネルギー値
+            const currentEnergy = energyHistRef.current[energyHistRef.current.length - 1] || { kTotal: 0, kRel: 0, uSpring: 0 };
+
+            return (
+                <div className="min-h-screen p-4 text-white">
+                    <div className="max-w-6xl mx-auto">
+                        {/* ヘッダー */}
+                        <div className="flex justify-between items-center mb-4">
+                            <h1 className="text-xl md:text-2xl font-bold bg-gradient-to-r from-pink-400 via-purple-400 to-blue-400 bg-clip-text text-transparent">
+                                重心系・相対運動ビジュアライザー
+                            </h1>
+                            <button 
+                                onClick={() => setShowInfo(true)}
+                                className="p-2 rounded-full bg-slate-700 hover:bg-slate-600 transition"
+                            >
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </button>
+                        </div>
+
+                        {/* モード選択 */}
+                        <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
+                            {[
+                                { id: 1, label: 'Mode 1: 1D衝突', desc: '一直線上の衝突' },
+                                { id: 2, label: 'Mode 2: 2D衝突', desc: '斜め衝突' },
+                                { id: 3, label: 'Mode 3: バネ系', desc: '東大モデル' }
+                            ].map(m => (
+                                <button
+                                    key={m.id}
+                                    onClick={() => { setMode(m.id); setPlaying(false); }}
+                                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition ${
+                                        mode === m.id 
+                                            ? 'bg-gradient-to-r from-blue-500 to-purple-500 text-white' 
+                                            : 'glass text-slate-300 hover:bg-slate-600'
+                                    }`}
+                                >
+                                    <div className="font-medium text-sm">{m.label}</div>
+                                    <div className="text-xs opacity-70">{m.desc}</div>
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="grid md:grid-cols-3 gap-4">
+                            {/* メインキャンバス */}
+                            <div className="md:col-span-2 glass rounded-xl overflow-hidden">
+                                <div className="h-64 md:h-96 relative">
+                                    <canvas ref={canvasRef} className="w-full h-full" />
+                                </div>
+                                {/* エネルギーグラフ */}
+                                <div className="p-3 border-t border-slate-700">
+                                    <div className="text-xs text-slate-400 mb-1">エネルギー履歴</div>
+                                    <div className="h-20">
+                                        <canvas ref={graphRef} className="w-full h-full" />
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* コントロールパネル */}
+                            <div className="glass rounded-xl p-4 space-y-4">
+                                {/* パラメータ */}
+                                <div>
+                                    <div className="text-sm font-medium text-slate-300 mb-2">パラメータ</div>
+                                    <ToggleGroup label="質量 m₁ (kg)" options={[1, 2, 3]} value={m1} onChange={setM1} />
+                                    <ToggleGroup label="質量 m₂ (kg)" options={[1, 2, 3]} value={m2} onChange={setM2} />
+                                    {mode === 3 && (
+                                        <ToggleGroup label="質量 m₃ (kg)" options={[1, 2, 3]} value={m3} onChange={setM3} />
+                                    )}
+                                    <ToggleGroup label="初速度 v₁ (m/s)" options={[0, 2, 4, 6]} value={v1} onChange={setV1} />
+                                    {mode !== 3 && (
+                                        <ToggleGroup label="初速度 v₂ (m/s)" options={[0, 2, 4, 6]} value={v2} onChange={setV2} />
+                                    )}
+                                    {mode === 2 && (
+                                        <div className="mb-3">
+                                            <div className="text-xs text-slate-400 mb-1">衝突パラメータ b</div>
+                                            <input
+                                                type="range"
+                                                min={-3}
+                                                max={3}
+                                                step={0.5}
+                                                value={impactB}
+                                                onChange={(e) => setImpactB(parseFloat(e.target.value))}
+                                                className="slider-track w-full"
+                                            />
+                                            <div className="text-xs text-center text-slate-400">b = {impactB}</div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* カメラ速度 */}
+                                <div>
+                                    <div className="text-sm font-medium text-slate-300 mb-1">カメラ速度</div>
+                                    <SnapSlider
+                                        value={cameraV}
+                                        onChange={setCameraV}
+                                        snapPoints={getSnapPoints()}
+                                        min={-1}
+                                        max={Math.max(7, v1 + 1)}
+                                    />
+                                    <div className="text-xs text-center text-slate-400 mt-1">V = {cameraV.toFixed(1)} m/s</div>
+                                </div>
+
+                                {/* オプション */}
+                                <div className="flex flex-wrap gap-2">
+                                    <label className="flex items-center gap-2 text-xs text-slate-300">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={autoScale} 
+                                            onChange={(e) => setAutoScale(e.target.checked)}
+                                            className="rounded"
+                                        />
+                                        自動スケール
+                                    </label>
+                                    {mode === 2 && (
+                                        <label className="flex items-center gap-2 text-xs text-slate-300">
+                                            <input 
+                                                type="checkbox" 
+                                                checked={alignRelV} 
+                                                onChange={(e) => setAlignRelV(e.target.checked)}
+                                                className="rounded"
+                                            />
+                                            相対速度にX軸整列
+                                        </label>
+                                    )}
+                                </div>
+
+                                {/* アクションボタン */}
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => setPlaying(!playing)}
+                                        className="flex-1 py-2 rounded-lg bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-400 hover:to-emerald-400 font-medium transition"
+                                    >
+                                        {playing ? '⏸ 一時停止' : '▶ 再生'}
+                                    </button>
+                                    <button
+                                        onClick={handleReset}
+                                        className="px-4 py-2 rounded-lg bg-slate-600 hover:bg-slate-500 transition"
+                                    >
+                                        🔄
+                                    </button>
+                                    <button
+                                        onClick={() => setSlowMo(!slowMo)}
+                                        className={`px-4 py-2 rounded-lg transition ${slowMo ? 'bg-amber-500' : 'bg-slate-600 hover:bg-slate-500'}`}
+                                    >
+                                        🐢
+                                    </button>
+                                </div>
+
+                                {/* エネルギー表示 */}
+                                <div>
+                                    <div className="text-sm font-medium text-slate-300 mb-2">エネルギー</div>
+                                    <EnergyBar label="運動エネルギー (全体)" value={currentEnergy.kTotal * 10} maxValue={50} color="#f472b6" />
+                                    <EnergyBar label="運動エネルギー (相対)" value={currentEnergy.kRel * 10} maxValue={50} color="#38bdf8" />
+                                    {mode === 3 && (
+                                        <EnergyBar label="弾性エネルギー" value={currentEnergy.uSpring * 100} maxValue={50} color="#a78bfa" />
+                                    )}
+                                </div>
+
+                                {/* 重心速度表示 */}
+                                <div className="text-center p-3 bg-slate-800 rounded-lg">
+                                    <div className="text-xs text-slate-400">重心速度 V<sub>G</sub></div>
+                                    <div className="text-2xl font-bold text-yellow-400">{calcVg().toFixed(2)} m/s</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 情報オーバーレイ */}
+                    {showInfo && (
+                        <div className="info-overlay" onClick={() => setShowInfo(false)}>
+                            <div className="glass rounded-2xl p-6 max-w-lg mx-4" onClick={(e) => e.stopPropagation()}>
+                                <h2 className="text-xl font-bold mb-4">使い方</h2>
+                                <div className="space-y-3 text-sm text-slate-300">
+                                    <div>
+                                        <strong className="text-white">Mode 1: 1D衝突</strong>
+                                        <p>一直線上での弾性衝突。カメラ速度を重心速度(V<sub>G</sub>)に合わせると、重心系での対称的な運動が観察できます。</p>
+                                    </div>
+                                    <div>
+                                        <strong className="text-white">Mode 2: 2D衝突</strong>
+                                        <p>斜め方向からの衝突。衝突パラメータ(b)で軌道を調整。「相対速度にX軸整列」で2D問題を1D的に解析できます。</p>
+                                    </div>
+                                    <div>
+                                        <strong className="text-white">Mode 3: バネ系</strong>
+                                        <p>東大入試モデル。物体Aが静止したBに衝突・合体し、B-C間のバネで振動。重心は等速直線運動を続けます。</p>
+                                    </div>
+                                    <div className="pt-2 border-t border-slate-700">
+                                        <strong className="text-yellow-400">+ マーク</strong>: 重心位置<br />
+                                        <strong className="text-yellow-400">→ 矢印</strong>: 速度ベクトル
+                                    </div>
+                                </div>
+                                <button 
+                                    onClick={() => setShowInfo(false)}
+                                    className="mt-4 w-full py-2 rounded-lg bg-slate-600 hover:bg-slate-500 transition"
+                                >
+                                    閉じる
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
