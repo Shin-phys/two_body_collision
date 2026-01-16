@@ -533,7 +533,6 @@
                         s.p3.x += s.p3.vx * subDt;
                         }
                     }
-                }
                 if (mode === 2) {
                     const camPos = { x: getCameraV().x * simTime * 60, y: getCameraV().y * simTime * 60 };
                     traceRef.current.p1.push({ x: s.p1.x - camPos.x, y: s.p1.y - camPos.y });
