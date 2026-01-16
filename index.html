@@ -159,7 +159,7 @@
         const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
         // 物理定数
-        const SPRING_K = 5; // バネ定数を小さくして振動を見やすく
+        const SPRING_K = 0.06; // バネ定数を小さくして振動を見やすく
         const DT = 1 / 60;
 
         // トグルボタン
@@ -283,19 +283,29 @@
             const [restitution, setRestitution] = useState(1.0); // 反発係数 e
             const [showInfo, setShowInfo] = useState(false);
             const [time, setTime] = useState(0);
-
+            const [showVelocityPlot, setShowVelocityPlot] = useState(false);
+            
             const canvasRef = useRef(null);
             const graphRef = useRef(null);
+            const springGraphRef = useRef(null);
             const stateRef = useRef(null);
-            // traceRefを削除（青い軌跡線を除去）
+            const traceRef = useRef({ p1: [], p2: [] });
             const energyHistRef = useRef([]);
+            const springHistRef = useRef([]);
             const animRef = useRef(null);
 
             // 重心速度計算（2Dベクトル対応）
             const calcVg = useCallback(() => {
                 if (mode === 4) {
-                    // バネ系
-                    return { x: (m1 * v1) / (m1 + m2 + m3), y: 0 };
+                    // バネ系（BとCを基準に重心速度）
+                    const s = stateRef.current;
+                    if (s?.p2 && s?.p3) {
+                        return {
+                            x: (s.p2.m * s.p2.vx + s.p3.m * s.p3.vx) / (s.p2.m + s.p3.m),
+                            y: 0
+                        };
+                    }
+                    return { x: 0, y: 0 };
                 } else if (mode === 2 || mode === 3) {
                     // 2Dモード
                     const totalM = m1 + m2;
@@ -359,12 +369,15 @@
             // 初期状態設定
             const initState = useCallback(() => {
                 energyHistRef.current = [];
-
+                springHistRef.current = [];
+                traceRef.current = { p1: [], p2: [] };
+                
                 if (mode === 1) {
                     stateRef.current = {
                         p1: { x: -150, y: 0, vx: v1, vy: 0, m: m1 },
                         p2: { x: 150, y: 0, vx: v2, vy: 0, m: m2 },
-                        collided: false
+                        collided: false,
+                        simTime: 0
                     };
                 } else if (mode === 2 || mode === 3) {
                     // 確実に衝突する初期座標
@@ -374,7 +387,8 @@
                     stateRef.current = {
                         p1: { x: initPos.p1.x, y: initPos.p1.y, vx: v2d.p1.vx, vy: v2d.p1.vy, m: m1 },
                         p2: { x: initPos.p2.x, y: initPos.p2.y, vx: v2d.p2.vx, vy: v2d.p2.vy, m: m2 },
-                        collided: false
+                        collided: false,
+                        simTime: 0
                     };
                 } else {
                     stateRef.current = {
@@ -382,11 +396,31 @@
                         p2: { x: 0, y: 0, vx: 0, vy: 0, m: m2, originalM: m2 },
                         p3: { x: 100, y: 0, vx: 0, vy: 0, m: m3 },
                         merged: false,
-                        springRest: 100
+                        collided: false,
+                        springRest: 100,
+                        simTime: 0,
+                        collisionTime: null,
+                        cameraAnchorX: null
                     };
                 }
                 setTime(0);
             }, [mode, m1, m2, m3, v1, v2, v2d, collisionPattern]);
+
+                        const getCameraPosition = useCallback((simTime, s) => {
+                const camV = getCameraV();
+                if (mode === 4) {
+                    const cmBC = (s.p2.m * s.p2.x + s.p3.m * s.p3.x) / (s.p2.m + s.p3.m);
+                    if (s.collisionTime === null || simTime < s.collisionTime) {
+                        return { x: cmBC, y: 0 };
+                    }
+                    const base = s.cameraAnchorX ?? cmBC;
+                    return {
+                        x: base + camV.x * (simTime - s.collisionTime) * 60,
+                        y: 0
+                    };
+                }
+                return { x: camV.x * simTime * 60, y: camV.y * simTime * 60 };
+            }, [getCameraV, mode]);
 
             const handleReset = () => {
                 setPlaying(false);
@@ -402,7 +436,9 @@
                 const s = stateRef.current;
                 if (!s) return;
                 const scale = dt * 60;
-
+                s.simTime = (s.simTime || 0) + dt;
+                const simTime = s.simTime;
+                
                 if (mode === 1) {
                     // 1D衝突
                     s.p1.x += s.p1.vx * scale;
@@ -454,59 +490,65 @@
                     // Mode 4: バネ系（Symplectic Euler法）
                     if (!s.merged) {
                         s.p1.x += s.p1.vx * scale;
-                        if (Math.abs(s.p1.x - s.p2.x) < 30) {
+                        if (!s.collided && Math.abs(s.p1.x - s.p2.x) < 30) {
                             // A-B衝突（反発係数適用）
                             const e = restitution;
+                            const totalM = s.p1.m + s.p2.originalM;
                             if (e === 0) {
                                 // 完全非弾性衝突（合体）
-                                const totalM = s.p1.m + s.p2.originalM;
                                 s.p2.vx = (s.p1.m * s.p1.vx + s.p2.originalM * s.p2.vx) / totalM;
                                 s.p2.m = totalM;
+                                s.p1.x = -9999;
+                                s.merged = true;
                             } else {
-                                // 弾性衝突（反発係数あり）
-                                const totalM = s.p1.m + s.p2.originalM;
                                 const v1New = ((s.p1.m - e * s.p2.originalM) * s.p1.vx + (1 + e) * s.p2.originalM * s.p2.vx) / totalM;
                                 const v2New = ((s.p2.originalM - e * s.p1.m) * s.p2.vx + (1 + e) * s.p1.m * s.p1.vx) / totalM;
-                                // バネ系では合体のため、反発係数に関係なく合体
-                                s.p2.vx = (s.p1.m * s.p1.vx + s.p2.originalM * s.p2.vx) / totalM;
-                                s.p2.m = totalM;
+                                s.p1.vx = v1New;
+                                s.p2.vx = v2New;
                             }
-                            s.p1.x = -9999;
-                            s.merged = true;
+                            s.collided = true;
+                            s.collisionTime = simTime;
+                            s.cameraAnchorX = (s.p2.m * s.p2.x + s.p3.m * s.p3.x) / (s.p2.m + s.p3.m);
                         }
                     }
 
-                    if (s.merged) {
-                        // Symplectic Euler法（サブステップで安定化）
-                        const subSteps = 10;
-                        const subDt = scale / subSteps;
+                    // Symplectic Euler法（サブステップで安定化）
+                    const subSteps = 10;
+                    const subDt = scale / subSteps;
 
                         for (let i = 0; i < subSteps; i++) {
-                            const stretch = (s.p3.x - s.p2.x) - s.springRest;
-                            const F = -SPRING_K * stretch;
+                        const stretch = (s.p3.x - s.p2.x) - s.springRest;
+                        const F = -SPRING_K * stretch;
 
                             // 加速度
-                            const a2 = -F / s.p2.m;
-                            const a3 = F / s.p3.m;
+                        const a2 = -F / s.p2.m;
+                        const a3 = F / s.p3.m;
 
-                            // 速度を先に更新（Symplectic Euler）
-                            s.p2.vx += a2 * subDt;
-                            s.p3.vx += a3 * subDt;
+                             // 速度を先に更新（Symplectic Euler）
+                        s.p2.vx += a2 * subDt;
+                        s.p3.vx += a3 * subDt;
 
                             // 更新された速度で位置を更新
-                            s.p2.x += s.p2.vx * subDt;
-                            s.p3.x += s.p3.vx * subDt;
+                        s.p2.x += s.p2.vx * subDt;
+                        s.p3.x += s.p3.vx * subDt;
                         }
                     }
                 }
-
-                // 軌跡は削除（青いノイズ線除去のため）
-
+                if (mode === 2) {
+                    const camPos = { x: getCameraV().x * simTime * 60, y: getCameraV().y * simTime * 60 };
+                    traceRef.current.p1.push({ x: s.p1.x - camPos.x, y: s.p1.y - camPos.y });
+                    traceRef.current.p2.push({ x: s.p2.x - camPos.x, y: s.p2.y - camPos.y });
+                    if (traceRef.current.p1.length > 240) {
+                        traceRef.current.p1.shift();
+                        traceRef.current.p2.shift();
+                    }
+                }
+            
                 // エネルギー計算
                 let kTotal = 0, kRel = 0, uSpring = 0;
                 const vg = calcVg();
 
-                if (mode === 4 && s.merged) {
+                if (mode === 4) {
                     kTotal = 0.5 * s.p2.m * s.p2.vx ** 2 + 0.5 * s.p3.m * s.p3.vx ** 2;
                     const stretch = (s.p3.x - s.p2.x) - s.springRest;
                     uSpring = 0.5 * SPRING_K * stretch ** 2;
@@ -523,8 +565,21 @@
 
                 energyHistRef.current.push({ kTotal: kTotal / 10, kRel: kRel / 10, uSpring: uSpring / 100 });
                 if (energyHistRef.current.length > 200) energyHistRef.current.shift();
-            }, [mode, calcVg, restitution]);
-
+            
+                if (mode === 4) {
+                    const camPos = getCameraPosition(simTime, s);
+                    const cameraVel = (s.collisionTime !== null && simTime >= s.collisionTime) ? getCameraV().x : 0;
+                    springHistRef.current.push({
+                        t: simTime,
+                        xB: s.p2.x - camPos.x,
+                        xC: s.p3.x - camPos.x,
+                        vB: s.p2.vx - cameraVel,
+                        vC: s.p3.vx - cameraVel
+                    });
+                    if (springHistRef.current.length > 240) springHistRef.current.shift();
+                }
+            }, [mode, calcVg, restitution, getCameraV, getCameraPosition]);
+        
             // 描画
             const draw = useCallback(() => {
                 const canvas = canvasRef.current;
@@ -534,13 +589,14 @@
                 const w = canvas.width;
                 const h = canvas.height;
                 const s = stateRef.current;
-                const camV = getCameraV();
-
+                const simTime = s.simTime || time;
+                const camPos = getCameraPosition(simTime, s);
+                
                 ctx.fillStyle = '#0f172a';
                 ctx.fillRect(0, 0, w, h);
 
-                const offsetX = w / 2 - camV.x * time * 60;
-                const offsetY = h / 2 - camV.y * time * 60;
+                const offsetX = w / 2 - camPos.x;
+                const offsetY = h / 2 - camPos.y;
 
                 // 動的グリッド
                 ctx.strokeStyle = 'rgba(148, 163, 184, 0.15)';
@@ -563,7 +619,23 @@
                 }
 
 
-                // 軌跡描画は削除（青い線ノイズ除去）
+                if (mode === 2) {
+                    const drawTrace = (trace, color) => {
+                        if (!trace.length) return;
+                        ctx.beginPath();
+                        trace.forEach((pos, idx) => {
+                            const x = w / 2 + pos.x;
+                            const y = h / 2 + pos.y;
+                            if (idx === 0) ctx.moveTo(x, y);
+                            else ctx.lineTo(x, y);
+                        });
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = 1;
+                        ctx.stroke();
+                    };
+                    drawTrace(traceRef.current.p1, 'rgba(148, 163, 184, 0.5)');
+                    drawTrace(traceRef.current.p2, 'rgba(148, 163, 184, 0.35)');
+                }
 
                 // 粒子描画関数
                 const drawParticle = (p, color, label) => {
@@ -720,7 +792,51 @@
                         gCtx.fillText('U spring', 105, 12);
                     }
                 }
-            }, [getCameraV, time, mode, calcVg, isSynced]);
+            
+                if (mode === 4) {
+                    const tCanvas = springGraphRef.current;
+                    const tCtx = tCanvas?.getContext('2d');
+                    if (tCtx) {
+                        const tw = tCanvas.width;
+                        const th = tCanvas.height;
+                        tCtx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+                        tCtx.fillRect(0, 0, tw, th);
+
+                        const hist = springHistRef.current;
+                        const values = hist.flatMap(h => showVelocityPlot ? [h.vB, h.vC] : [h.xB, h.xC]);
+                        const maxAbs = Math.max(20, ...values.map(v => Math.abs(v)));
+
+                        tCtx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
+                        tCtx.beginPath();
+                        tCtx.moveTo(0, th / 2);
+                        tCtx.lineTo(tw, th / 2);
+                        tCtx.stroke();
+
+                        const drawLine = (key, color) => {
+                            tCtx.beginPath();
+                            hist.forEach((h, i) => {
+                                const x = (i / 240) * tw;
+                                const yVal = showVelocityPlot ? h[key.replace('x', 'v')] : h[key];
+                                const y = th / 2 - (yVal / maxAbs) * (th * 0.45);
+                                if (i === 0) tCtx.moveTo(x, y);
+                                else tCtx.lineTo(x, y);
+                            });
+                            tCtx.strokeStyle = color;
+                            tCtx.lineWidth = 2;
+                            tCtx.stroke();
+                        };
+
+                        drawLine('xB', '#38bdf8');
+                        drawLine('xC', '#4ade80');
+
+                        tCtx.font = '10px sans-serif';
+                        tCtx.fillStyle = '#38bdf8';
+                        tCtx.fillText('B', 6, 12);
+                        tCtx.fillStyle = '#4ade80';
+                        tCtx.fillText('C', 20, 12);
+                    }
+                }
+            }, [getCameraV, getCameraPosition, time, mode, calcVg, isSynced, showVelocityPlot]);
 
             // アニメーションループ
             useEffect(() => {
@@ -749,6 +865,10 @@
                     if (graph) {
                         graph.width = graph.parentElement.clientWidth;
                         graph.height = 80;
+                    }
+                   if (springGraphRef.current) {
+                        springGraphRef.current.width = springGraphRef.current.parentElement.clientWidth;
+                        springGraphRef.current.height = 90;
                     }
                     draw();
                 };
@@ -817,6 +937,24 @@
                                         <canvas ref={graphRef} className="w-full h-full" />
                                     </div>
                                 </div>
+                            {mode === 4 && (
+                                    <div className="p-2 border-t border-slate-700">
+                                        <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
+                                            <span>{showVelocityPlot ? 'v-t' : 'x-t'} (カメラ相対)</span>
+                                            <label className="flex items-center gap-1 text-slate-400">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={showVelocityPlot}
+                                                    onChange={(e) => setShowVelocityPlot(e.target.checked)}
+                                                />
+                                                v-t
+                                            </label>
+                                        </div>
+                                        <div className="h-20">
+                                            <canvas ref={springGraphRef} className="w-full h-full" />
+                                        </div>
+                                    </div>
+                                )}
                             </div>
 
                             {/* コントロールパネル */}
@@ -1008,7 +1146,7 @@
                                     </div>
                                     <div>
                                         <strong className="text-white">バネ系</strong>
-                                        <p>東大入試モデル。AがBに衝突・合体後、B-C間のバネで振動。Symplectic積分法によりエネルギーが長時間保存されます。</p>
+                                       <p>東大入試モデル。AがBに衝突し、e=0のときは合体してB-C間のバネで振動します。Symplectic積分法によりエネルギーが長時間保存されます。</p>
                                     </div>
                                     <div className="pt-2 border-t border-slate-700 text-xs">
                                         <strong className="text-yellow-400">+ マーク</strong>: 重心位置<br />
