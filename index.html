@@ -299,7 +299,7 @@
                 if (mode === 4) {
                     // バネ系（BとCを基準に重心速度）
                     const s = stateRef.current;
-                    if (s?.p2 && s?.p3) {
+                    if (s && s.p2 && s.p3) {
                         return {
                             x: (s.p2.m * s.p2.vx + s.p3.m * s.p3.vx) / (s.p2.m + s.p3.m),
                             y: 0
@@ -413,7 +413,9 @@
                     if (s.collisionTime === null || simTime < s.collisionTime) {
                         return { x: cmBC, y: 0 };
                     }
-                    const base = s.cameraAnchorX ?? cmBC;
+                    const base = s.cameraAnchorX !== null && s.cameraAnchorX !== undefined
+                        ? s.cameraAnchorX
+                        : cmBC;
                     return {
                         x: base + camV.x * (simTime - s.collisionTime) * 60,
                         y: 0
