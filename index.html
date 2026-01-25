@@ -56,6 +56,9 @@
 
         canvas {
             display: block;
+            touch-action: none;
+            /* タッチ操作、スクロールとの干渉防止 */
+            user-select: none;
         }
 
         .energy-bar {
@@ -261,11 +264,33 @@
             const [v1, setV1] = useState(4);
             const [v2, setV2] = useState(0);
 
+            // 2Dパターン1用のYオフセット
+            const [p1YOffset, setP1YOffset] = useState(20);
+
+            // グラフのビュー状態 (1D, バネ)
+            const [oneDView, setOneDView] = useState({ scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 });
+            const [springView, setSpringView] = useState({ scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 });
+
+            // ビュー状態のRef (イベントハンドラ内で最新値を参照するため)
+            const oneDViewRef = useRef(oneDView);
+            const springViewRef = useRef(springView);
+
+            useEffect(() => { oneDViewRef.current = oneDView; }, [oneDView]);
+            useEffect(() => { springViewRef.current = springView; }, [springView]);
+
+            // グラフ操作用のRef (矩形ズーム用)
+            const oneDDragRef = useRef({ active: false, startX: 0, startY: 0, currentX: 0, currentY: 0, mode: 'pan' });
+
+            // グラフのビュー状態履歴 (Undo用)
+            const oneDHistoryRef = useRef([]);
+            const springHistoryRef = useRef([]);
+
             // 2Dモード用の固定速度（4パターン）
-            const [collisionPattern, setCollisionPattern] = useState(1);            const v2d = useMemo(() => {
+            const [collisionPattern, setCollisionPattern] = useState(1);
+            const v2d = useMemo(() => {
                 if (collisionPattern === 1) {
-                    // パターン1: 両方y成分正（上向き）
-                    return { p1: { vx: 3, vy: 1 }, p2: { vx: -3, vy: 1 } };
+                    // パターン1: Bは静止 (Aは水平に動くが位置ずれで衝突)
+                    return { p1: { vx: 3, vy: 0 }, p2: { vx: 0, vy: 0 } };
                 }
                 if (collisionPattern === 2) {
                     // パターン2: y成分正と負（交差）
@@ -290,14 +315,18 @@
             const [showInfo, setShowInfo] = useState(false);
             const [time, setTime] = useState(0);
             const [showVelocityPlot, setShowVelocityPlot] = useState(false);
-            
+            const [showXtPlot, setShowXtPlot] = useState(false);
+            const [showCmPlot, setShowCmPlot] = useState(false);
+
             const canvasRef = useRef(null);
-            const graphRef = useRef(null);
+            const oneDGraphRef = useRef(null);
             const springGraphRef = useRef(null);
             const stateRef = useRef(null);
             const traceRef = useRef({ p1: [], p2: [] });
             const energyHistRef = useRef([]);
             const springHistRef = useRef([]);
+            const oneDHistRef = useRef([]);
+            const springDragRef = useRef({ active: false, startX: 0, startY: 0, currentX: 0, currentY: 0, mode: 'pan' });
             const animRef = useRef(null);
 
             // 重心速度計算（2Dベクトル対応）
@@ -376,8 +405,9 @@
             const initState = useCallback(() => {
                 energyHistRef.current = [];
                 springHistRef.current = [];
+                oneDHistRef.current = [];
                 traceRef.current = { p1: [], p2: [] };
-                
+
                 if (mode === 1) {
                     stateRef.current = {
                         p1: { x: -150, y: 0, vx: v1, vy: 0, m: m1 },
@@ -387,7 +417,10 @@
                     };
                 } else if (mode === 2 || mode === 3) {                    // 確実に衝突する初期座標
                     let initPos;
-                    if (collisionPattern === 1 || collisionPattern === 3) {
+                    if (collisionPattern === 1) {
+                        // パターン1: Bは静止、AのY座標をオフセットで調整
+                        initPos = { p1: { x: -150, y: -60 + p1YOffset }, p2: { x: 150, y: -60 } };
+                    } else if (collisionPattern === 3) {
                         // 両方同じy座標
                         initPos = { p1: { x: -150, y: -60 }, p2: { x: 150, y: -60 } };
                     } else if (collisionPattern === 2) {
@@ -396,7 +429,8 @@
                     } else {
                         // パターン4: 斜め高速（近いyで確実に接近）
                         initPos = { p1: { x: -150, y: -30 }, p2: { x: 150, y: -50 } };
-                    }stateRef.current = {
+                    }
+                    stateRef.current = {
                         p1: { x: initPos.p1.x, y: initPos.p1.y, vx: v2d.p1.vx, vy: v2d.p1.vy, m: m1 },
                         p2: { x: initPos.p2.x, y: initPos.p2.y, vx: v2d.p2.vx, vy: v2d.p2.vy, m: m2 },
                         collided: false,
@@ -416,9 +450,9 @@
                     };
                 }
                 setTime(0);
-            }, [mode, m1, m2, m3, v1, v2, v2d, collisionPattern]);
+            }, [mode, m1, m2, m3, v1, v2, v2d, collisionPattern, p1YOffset]);
 
-                        const getCameraPosition = useCallback((simTime, s) => {
+            const getCameraPosition = useCallback((simTime, s) => {
                 const camV = getCameraV();
                 if (mode === 4) {
                     const cmBC = (s.p2.m * s.p2.x + s.p3.m * s.p3.x) / (s.p2.m + s.p3.m);
@@ -450,7 +484,7 @@
                 const scale = dt * 60;
                 s.simTime = (s.simTime || 0) + dt;
                 const simTime = s.simTime;
-                
+
                 if (mode === 1) {
                     // 1D衝突
                     s.p1.x += s.p1.vx * scale;
@@ -528,23 +562,23 @@
                     const subSteps = 10;
                     const subDt = scale / subSteps;
 
-                        for (let i = 0; i < subSteps; i++) {
+                    for (let i = 0; i < subSteps; i++) {
                         const stretch = (s.p3.x - s.p2.x) - s.springRest;
                         const F = -SPRING_K * stretch;
 
-                            // 加速度
+                        // 加速度
                         const a2 = -F / s.p2.m;
                         const a3 = F / s.p3.m;
 
-                             // 速度を先に更新（Symplectic Euler）
+                        // 速度を先に更新（Symplectic Euler）
                         s.p2.vx += a2 * subDt;
                         s.p3.vx += a3 * subDt;
 
-                            // 更新された速度で位置を更新
+                        // 更新された速度で位置を更新
                         s.p2.x += s.p2.vx * subDt;
                         s.p3.x += s.p3.vx * subDt;
-                        }
                     }
+                }
                 if (mode === 2 || mode === 3) {
                     const camPos = { x: getCameraV().x * simTime * 60, y: getCameraV().y * simTime * 60 };
                     traceRef.current.p1.push({ x: s.p1.x - camPos.x, y: s.p1.y - camPos.y });
@@ -554,7 +588,7 @@
                         traceRef.current.p2.shift();
                     }
                 }
-            
+
                 // エネルギー計算
                 let kTotal = 0, kRel = 0, uSpring = 0;
                 const vg = calcVg();
@@ -576,7 +610,7 @@
 
                 energyHistRef.current.push({ kTotal: kTotal / 10, kRel: kRel / 10, uSpring: uSpring / 100 });
                 if (energyHistRef.current.length > 200) energyHistRef.current.shift();
-            
+
                 if (mode === 4) {
                     const camPos = getCameraPosition(simTime, s);
                     const cameraVel = (s.collisionTime !== null && simTime >= s.collisionTime) ? getCameraV().x : 0;
@@ -589,8 +623,23 @@
                     });
                     if (springHistRef.current.length > 240) springHistRef.current.shift();
                 }
+
+                if (mode === 1) {
+                    const cmVx = (s.p1.m * s.p1.vx + s.p2.m * s.p2.vx) / (s.p1.m + s.p2.m);
+                    const cmX = (s.p1.m * s.p1.x + s.p2.m * s.p2.x) / (s.p1.m + s.p2.m);
+                    oneDHistRef.current.push({
+                        t: simTime,
+                        v1: s.p1.vx,
+                        v2: s.p2.vx,
+                        x1: s.p1.x,
+                        x2: s.p2.x,
+                        vcm: cmVx,
+                        xcm: cmX
+                    });
+                    if (oneDHistRef.current.length > 240) oneDHistRef.current.shift();
+                }
             }, [mode, calcVg, restitution, getCameraV, getCameraPosition]);
-        
+
             // 描画
             const draw = useCallback(() => {
                 const canvas = canvasRef.current;
@@ -602,7 +651,7 @@
                 const s = stateRef.current;
                 const simTime = s.simTime || time;
                 const camPos = getCameraPosition(simTime, s);
-                
+
                 ctx.fillStyle = '#0f172a';
                 ctx.fillRect(0, 0, w, h);
 
@@ -764,46 +813,78 @@
                     ctx.fillText('VG', cmPx + vg.x * vScale + 5, cmPy + vg.y * vScale);
                 }
 
-                // エネルギーグラフ
-                const gCanvas = graphRef.current;
-                const gCtx = gCanvas?.getContext('2d');
-                if (gCtx) {
-                    const gw = gCanvas.width;
-                    const gh = gCanvas.height;
-                    gCtx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-                    gCtx.fillRect(0, 0, gw, gh);
+                if (mode === 1) {
+                    const gCanvas = oneDGraphRef.current;
+                    const gCtx = gCanvas?.getContext('2d');
+                    if (gCtx) {
+                        const gw = gCanvas.width;
+                        const gh = gCanvas.height;
+                        gCtx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+                        gCtx.fillRect(0, 0, gw, gh);
 
-                    const hist = energyHistRef.current;
-                    const maxE = Math.max(10, ...hist.map(h => Math.max(h.kTotal, h.kRel, h.uSpring)));
+                        const hist = oneDHistRef.current;
+                        const values = hist.flatMap(h => showXtPlot ? [h.x1, h.x2, h.xcm] : [h.v1, h.v2, h.vcm]);
+                        const maxAbs = Math.max(10, ...values.map(v => Math.abs(v)));
 
-                    const drawLine = (key, color) => {
+                        gCtx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
                         gCtx.beginPath();
-                        hist.forEach((h, i) => {
-                            const x = (i / 200) * gw;
-                            const y = gh - (h[key] / maxE) * gh * 0.9;
-                            if (i === 0) gCtx.moveTo(x, y);
-                            else gCtx.lineTo(x, y);
-                        });
-                        gCtx.strokeStyle = color;
-                        gCtx.lineWidth = 2;
+                        gCtx.moveTo(0, gh / 2);
+                        gCtx.lineTo(gw, gh / 2);
                         gCtx.stroke();
-                    };
 
-                    drawLine('kTotal', '#f472b6');
-                    drawLine('kRel', '#38bdf8');
-                    if (mode === 4) drawLine('uSpring', '#a78bfa');
+                        const drawLine = (key, color, dashed = false) => {
+                            const { scaleX, scaleY, offsetX, offsetY } = oneDView;
 
-                    gCtx.font = '10px sans-serif';
-                    gCtx.fillStyle = '#f472b6';
-                    gCtx.fillText('K total', 5, 12);
-                    gCtx.fillStyle = '#38bdf8';
-                    gCtx.fillText('K rel', 60, 12);
-                    if (mode === 4) {
-                        gCtx.fillStyle = '#a78bfa';
-                        gCtx.fillText('U spring', 105, 12);
+                            gCtx.beginPath();
+                            hist.forEach((h, i) => {
+                                const x = ((i / 240) * gw * scaleX) + offsetX;
+                                const yVal = h[key];
+                                const y = gh / 2 - (yVal / maxAbs) * (gh * 0.45) * scaleY + offsetY;
+                                if (i === 0) gCtx.moveTo(x, y);
+                                else gCtx.lineTo(x, y);
+                            });
+                            gCtx.strokeStyle = color;
+                            gCtx.lineWidth = 2;
+                            gCtx.setLineDash(dashed ? [6, 4] : []);
+                            gCtx.stroke();
+                            gCtx.setLineDash([]);
+                        };
+
+                        if (showXtPlot) {
+                            drawLine('x1', '#f472b6');
+                            drawLine('x2', '#38bdf8');
+                            if (showCmPlot) drawLine('xcm', '#facc15', true);
+                        } else {
+                            drawLine('v1', '#f472b6');
+                            drawLine('v2', '#38bdf8');
+                            if (showCmPlot) drawLine('vcm', '#facc15', true);
+                        }
+
+                        gCtx.font = '11px sans-serif';
+                        gCtx.fillStyle = '#f472b6';
+                        gCtx.fillText('A', 6, 12);
+                        gCtx.fillStyle = '#38bdf8';
+                        gCtx.fillText('B', 20, 12);
+                        if (showCmPlot) {
+                            gCtx.fillStyle = '#facc15';
+                            gCtx.fillText('CM', 34, 12);
+                        }
+
+                        // 矩形ズームの選択範囲描画
+                        const d = oneDDragRef.current;
+                        if (d.active && d.mode === 'zoom') {
+                            const rectX = Math.min(d.startX, d.currentX);
+                            const rectY = Math.min(d.startY, d.currentY);
+                            const rectW = Math.abs(d.currentX - d.startX);
+                            const rectH = Math.abs(d.currentY - d.startY);
+                            gCtx.fillStyle = 'rgba(56, 189, 248, 0.2)';
+                            gCtx.strokeStyle = 'rgba(56, 189, 248, 0.8)';
+                            gCtx.fillRect(rectX, rectY, rectW, rectH);
+                            gCtx.strokeRect(rectX, rectY, rectW, rectH);
+                        }
                     }
                 }
-            
+
                 if (mode === 4) {
                     const tCanvas = springGraphRef.current;
                     const tCtx = tCanvas?.getContext('2d');
@@ -816,19 +897,20 @@
                         const hist = springHistRef.current;
                         const values = hist.flatMap(h => showVelocityPlot ? [h.vB, h.vC] : [h.xB, h.xC]);
                         const maxAbs = Math.max(20, ...values.map(v => Math.abs(v)));
+                        const { scaleX, scaleY, offsetX, offsetY } = springView;
 
                         tCtx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
                         tCtx.beginPath();
-                        tCtx.moveTo(0, th / 2);
-                        tCtx.lineTo(tw, th / 2);
+                        tCtx.moveTo(0, th / 2 + offsetY);
+                        tCtx.lineTo(tw, th / 2 + offsetY);
                         tCtx.stroke();
 
                         const drawLine = (key, color) => {
                             tCtx.beginPath();
                             hist.forEach((h, i) => {
-                                const x = (i / 240) * tw;
+                                const x = (i / 240) * tw * scaleX + offsetX;
                                 const yVal = showVelocityPlot ? h[key.replace('x', 'v')] : h[key];
-                                const y = th / 2 - (yVal / maxAbs) * (th * 0.45);
+                                const y = th / 2 - (yVal / maxAbs) * (th * 0.45) * scaleY + offsetY;
                                 if (i === 0) tCtx.moveTo(x, y);
                                 else tCtx.lineTo(x, y);
                             });
@@ -845,9 +927,22 @@
                         tCtx.fillText('B', 6, 12);
                         tCtx.fillStyle = '#4ade80';
                         tCtx.fillText('C', 20, 12);
+
+                        // 矩形ズームの選択範囲描画
+                        const d = springDragRef.current;
+                        if (d.active && d.mode === 'zoom') {
+                            const rectX = Math.min(d.startX, d.currentX);
+                            const rectY = Math.min(d.startY, d.currentY);
+                            const rectW = Math.abs(d.currentX - d.startX);
+                            const rectH = Math.abs(d.currentY - d.startY);
+                            tCtx.fillStyle = 'rgba(56, 189, 248, 0.2)';
+                            tCtx.strokeStyle = 'rgba(56, 189, 248, 0.8)';
+                            tCtx.fillRect(rectX, rectY, rectW, rectH);
+                            tCtx.strokeRect(rectX, rectY, rectW, rectH);
+                        }
                     }
                 }
-            }, [getCameraV, getCameraPosition, time, mode, calcVg, isSynced, showVelocityPlot]);
+            }, [getCameraV, getCameraPosition, time, mode, calcVg, isSynced, showVelocityPlot, showXtPlot, showCmPlot, springView, oneDView]);
 
             // アニメーションループ
             useEffect(() => {
@@ -868,18 +963,18 @@
             useEffect(() => {
                 const resize = () => {
                     const canvas = canvasRef.current;
-                    const graph = graphRef.current;
+                    const oneDGraph = oneDGraphRef.current;
                     if (canvas) {
                         canvas.width = canvas.parentElement.clientWidth;
                         canvas.height = canvas.parentElement.clientHeight;
                     }
-                    if (graph) {
-                        graph.width = graph.parentElement.clientWidth;
-                        graph.height = 80;
+                    if (oneDGraph) {
+                        oneDGraph.width = oneDGraph.parentElement.clientWidth;
+                        oneDGraph.height = oneDGraph.parentElement.clientHeight;
                     }
-                   if (springGraphRef.current) {
+                    if (springGraphRef.current) {
                         springGraphRef.current.width = springGraphRef.current.parentElement.clientWidth;
-                        springGraphRef.current.height = 90;
+                        springGraphRef.current.height = springGraphRef.current.parentElement.clientHeight;
                     }
                     draw();
                 };
@@ -887,6 +982,144 @@
                 window.addEventListener('resize', resize);
                 return () => window.removeEventListener('resize', resize);
             }, [draw]);
+
+
+            // グラフ操作用フック (矩形ズーム対応版)
+            const useGraphControl = (canvasRef, setViewState, viewRef, dragRef, historyRef) => {
+                useEffect(() => {
+                    const canvas = canvasRef.current;
+                    if (!canvas) return;
+
+                    const handlePointerDown = (event) => {
+                        const rect = canvas.getBoundingClientRect();
+                        const x = event.clientX - rect.left;
+                        const y = event.clientY - rect.top;
+
+                        // Shiftキーで矩形ズームモード
+                        const mode = event.shiftKey ? 'zoom' : 'pan';
+
+                        dragRef.current = {
+                            active: true,
+                            mode: mode,
+                            startX: x,
+                            startY: y,
+                            currentX: x,
+                            currentY: y,
+                            startOffsetX: viewRef.current.offsetX,
+                            startOffsetY: viewRef.current.offsetY
+                        };
+                        canvas.setPointerCapture(event.pointerId);
+                    };
+
+                    const handlePointerMove = (event) => {
+                        if (!dragRef.current.active) return;
+                        const rect = canvas.getBoundingClientRect();
+                        const x = event.clientX - rect.left;
+                        const y = event.clientY - rect.top;
+
+                        dragRef.current.currentX = x;
+                        dragRef.current.currentY = y;
+
+                        if (dragRef.current.mode === 'pan') {
+                            const dx = x - dragRef.current.startX;
+                            const dy = y - dragRef.current.startY;
+                            setViewState(prev => ({
+                                ...prev,
+                                offsetX: dragRef.current.startOffsetX + dx,
+                                offsetY: dragRef.current.startOffsetY + dy
+                            }));
+                        }
+                        // 矩形描画のために再描画が必要だが、requestAnimationFrameループで処理される
+                    };
+
+                    const handlePointerUp = (event) => {
+                        const d = dragRef.current;
+                        if (!d.active) return;
+
+                        if (d.mode === 'zoom') {
+                            const rectX = Math.min(d.startX, d.currentX);
+                            const rectY = Math.min(d.startY, d.currentY);
+                            const rectW = Math.abs(d.currentX - d.startX);
+                            const rectH = Math.abs(d.currentY - d.startY);
+
+                            // 誤操作防止：ある程度大きくドラッグした場合のみズーム
+                            if (rectW > 10 && rectH > 10) {
+                                // 履歴保存
+                                historyRef.current.push(viewRef.current);
+                                if (historyRef.current.length > 20) historyRef.current.shift();
+
+                                const canvasW = canvas.width;
+                                const canvasH = canvas.height;
+                                const centerX = (d.startX + d.currentX) / 2;
+                                const centerY = (d.startY + d.currentY) / 2;
+
+                                setViewState(prev => {
+                                    const zoomX = canvasW / rectW;
+                                    const zoomY = canvasH / rectH;
+                                    const newScaleX = prev.scaleX * zoomX;
+                                    const newScaleY = prev.scaleY * zoomY;
+
+                                    // 中心を合わせる計算
+                                    // 現在の画面中心からのズレを補正
+                                    // 簡易実装: 中心点にフォーカス
+                                    return {
+                                        scaleX: newScaleX,
+                                        scaleY: newScaleY,
+                                        // ズーム後の左上座標を計算してオフセットを設定
+                                        // 現在のオフセットの影響も含めて、選択範囲の左上が新しいビューの左上に来るようにする
+                                        offsetX: prev.offsetX * zoomX - (rectX * zoomX) + (canvasW / 2) * (zoomX - 1) * 0, // 簡易補正: 0 start
+                                        // 正確な補正:
+                                        // 新しいoffsetX = (現在のoffsetX - 選択範囲左上) * ズーム率 ? 
+                                        // より単純に: 選択範囲の中心がキャンバスの中心に来るようにする
+                                        offsetX: (canvasW / 2) - ((rectX + rectW / 2) - prev.offsetX) * zoomX - prev.offsetX * (zoomX - 1) + prev.offsetX * zoomX,
+                                        // 試行錯誤ではなく論理的に:
+                                        // 元のデータ空間での中心座標 = (画面上の中心 - offsetX) / scaleX
+                                        // 新しいデータ空間での中心座標 = (画面上の中心 - newOffsetX) / newScaleX
+                                        // データ空間での選択範囲中心 = ((rectX + rectW/2) - offsetX) / scaleX
+                                        // これが新しい画面中心 (canvasW/2) に来るようにしたい
+                                        // (canvasW/2 - newOffsetX) / newScaleX = ((rectX + rectW/2) - offsetX) / scaleX
+                                        // newOffsetX = canvasW/2 - [((rectX + rectW/2) - offsetX) / scaleX] * newScaleX
+                                        offsetX: canvasW / 2 - (((rectX + rectW / 2) - prev.offsetX) / prev.scaleX) * newScaleX,
+                                        offsetY: canvasH / 2 - (((rectY + rectH / 2) - prev.offsetY) / prev.scaleY) * newScaleY
+                                    };
+                                });
+                            }
+                        }
+
+                        d.active = false;
+                        d.mode = 'pan'; // Reset
+                        try { canvas.releasePointerCapture(event.pointerId); } catch (e) { }
+                    };
+
+                    canvas.addEventListener('pointerdown', handlePointerDown);
+                    canvas.addEventListener('pointermove', handlePointerMove);
+                    canvas.addEventListener('pointerup', handlePointerUp);
+                    canvas.addEventListener('pointerleave', handlePointerUp);
+
+                    return () => {
+                        canvas.removeEventListener('pointerdown', handlePointerDown);
+                        canvas.removeEventListener('pointermove', handlePointerMove);
+                        canvas.removeEventListener('pointerup', handlePointerUp);
+                        canvas.removeEventListener('pointerleave', handlePointerUp);
+                    };
+                }, [canvasRef, setViewState, viewRef, dragRef, historyRef]);
+            };
+
+            const handleUndo = (setFunc, historyRef) => {
+                if (historyRef.current.length > 0) {
+                    const prev = historyRef.current.pop();
+                    setFunc(prev);
+                }
+            };
+
+            const handleResetZoom = (setFunc, historyRef) => {
+                historyRef.current = []; // 履歴クリア
+                setFunc({ scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 });
+            };
+
+            // 1Dとバネグラフの両方に適用
+            useGraphControl(oneDGraphRef, setOneDView, oneDViewRef, oneDDragRef, oneDHistoryRef);
+            useGraphControl(springGraphRef, setSpringView, springViewRef, springDragRef, springHistoryRef);
 
             const currentEnergy = energyHistRef.current[energyHistRef.current.length - 1] || { kTotal: 0, kRel: 0, uSpring: 0 };
             const vg = calcVg();
@@ -942,16 +1175,46 @@
                                 <div className="h-56 md:h-80 relative">
                                     <canvas ref={canvasRef} className="w-full h-full" />
                                 </div>
-                                <div className="p-2 border-t border-slate-700">
-                                    <div className="text-xs text-slate-400 mb-1">エネルギー履歴</div>
-                                    <div className="h-16">
-                                        <canvas ref={graphRef} className="w-full h-full" />
+                                {mode === 1 && (
+                                    <div className="p-3 border-t border-slate-700">
+                                        <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+                                            <span>{showXtPlot ? 'x-t' : 'v-t'} (Shift+ドラッグ: 矩形ズーム)</span>
+                                            <div className="flex gap-2">
+                                                <button onClick={() => handleUndo(setOneDView, oneDHistoryRef)} className="px-1 bg-slate-700 rounded hover:bg-slate-600">Undo</button>
+                                                <button onClick={() => handleResetZoom(setOneDView, oneDHistoryRef)} className="px-1 bg-slate-700 rounded hover:bg-slate-600">Reset</button>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                                <label className="flex items-center gap-1 text-slate-400">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={showXtPlot}
+                                                        onChange={(e) => setShowXtPlot(e.target.checked)}
+                                                    />
+                                                    x-t
+                                                </label>
+                                                <label className="flex items-center gap-1 text-slate-400">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={showCmPlot}
+                                                        onChange={(e) => setShowCmPlot(e.target.checked)}
+                                                    />
+                                                    CM
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <div className="h-56">
+                                            <canvas ref={oneDGraphRef} className="w-full h-full" />
+                                        </div>
                                     </div>
-                                </div>
-                            {mode === 4 && (
+                                )}
+                                {mode === 4 && (
                                     <div className="p-2 border-t border-slate-700">
                                         <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                                            <span>{showVelocityPlot ? 'v-t' : 'x-t'} (カメラ相対)</span>
+                                            <span>{showVelocityPlot ? 'v-t' : 'x-t'} (Shift+ドラッグ: 矩形ズーム)</span>
+                                            <div className="flex gap-2">
+                                                <button onClick={() => handleUndo(setSpringView, springHistoryRef)} className="px-1 bg-slate-700 rounded hover:bg-slate-600">Undo</button>
+                                                <button onClick={() => handleResetZoom(setSpringView, springHistoryRef)} className="px-1 bg-slate-700 rounded hover:bg-slate-600">Reset</button>
+                                            </div>
                                             <label className="flex items-center gap-1 text-slate-400">
                                                 <input
                                                     type="checkbox"
@@ -961,14 +1224,12 @@
                                                 v-t
                                             </label>
                                         </div>
-                                        <div className="h-20">
+                                        <div className="h-56">
                                             <canvas ref={springGraphRef} className="w-full h-full" />
                                         </div>
                                     </div>
                                 )}
-                            </div>
-
-                            {/* コントロールパネル */}
+                            </div>{/* コントロールパネル */}
                             <div className="glass rounded-xl p-3 space-y-3 text-sm">
                                 {/* パラメータ */}
                                 <div>
@@ -994,11 +1255,25 @@
                                                 value={collisionPattern}
                                                 onChange={setCollisionPattern}
                                             />
-                                            <div className="text-xs text-slate-400 p-2 bg-slate-800 rounded">
-                                                {collisionPattern === 1 && '両方上向き: A=(3, 1), B=(-3, 1) m/s'}
+                                            <div className="text-xs text-slate-400 p-2 bg-slate-800 rounded mb-2">
+                                                {collisionPattern === 1 && 'B静止: 斜め衝突（位置ずれ）'}
                                                 {collisionPattern === 2 && '交差: A=(3, -1), B=(-3, 1) m/s'}
                                                 {collisionPattern === 3 && '両方下向き: A=(3, -1), B=(-3, -1) m/s'}
-                                                {collisionPattern === 4 && '斜め高速: A=(4, 0.5), B=(-2.5, 1.5) m/s'}</div>
+                                                {collisionPattern === 4 && '斜め高速: A=(4, 0.5), B=(-2.5, 1.5) m/s'}
+                                            </div>
+                                            {collisionPattern === 1 && (
+                                                <div className="mb-3">
+                                                    <div className="text-xs text-slate-400 mb-1">AのY位置 (衝突調整): {p1YOffset}</div>
+                                                    <input
+                                                        type="range"
+                                                        min="-40"
+                                                        max="40"
+                                                        value={p1YOffset}
+                                                        onChange={(e) => setP1YOffset(parseFloat(e.target.value))}
+                                                        className="slider-track"
+                                                    />
+                                                </div>
+                                            )}
                                         </>
                                     )}
                                     {/* 反発係数 */}
@@ -1157,7 +1432,7 @@
                                     </div>
                                     <div>
                                         <strong className="text-white">バネ系</strong>
-                                       <p>東大入試モデル。AがBに衝突し、e=0のときは合体してB-C間のバネで振動します。Symplectic積分法によりエネルギーが長時間保存されます。</p>
+                                        <p>東大入試モデル。AがBに衝突し、e=0のときは合体してB-C間のバネで振動します。Symplectic積分法によりエネルギーが長時間保存されます。</p>
                                     </div>
                                     <div className="pt-2 border-t border-slate-700 text-xs">
                                         <strong className="text-yellow-400">+ マーク</strong>: 重心位置<br />
