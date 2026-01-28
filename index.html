@@ -1420,11 +1420,11 @@
                                 <div className="space-y-3 text-sm text-slate-300">
                                     <div>
                                         <strong className="text-white">1D衝突</strong>
-                                        <p>一直線上での弾性衝突。v₂に負の値を設定すると正面衝突になります。カメラ速度をVGに合わせると重心系が観察できます。</p>
+                                        <p>一直線上での弾性衝突。v₂に負の値を設定すると正面衝突になります。カメラ速度をVGに合わせると重心系（CM系）が観察できます。また、CM系では、常に物体A-重心-物体Bが質量の逆比となっている点にも注目してください。</p>
                                     </div>
                                     <div>
                                         <strong className="text-white">2D基本</strong>
-                                        <p>斜め衝突。カメラ速度の<strong>大きさ</strong>をスライダーで調整。方向はVGに固定されています。</p>
+                                        <p>斜め衝突。４パターンの斜め衝突があります。パターン１では、物体Bが静止。スライダーで物体Aの初期Y座標を調整できます。カメラ速度の大きさをスライダーで調整。方向はVGに固定されています。<strong>カメラ速度がVGとなったときは衝突前も後も物体の速度の向きが180度ずれている点に注目してください。</strong></p>
                                     </div>
                                     <div>
                                         <strong className="text-white">2D発展</strong>
@@ -1432,7 +1432,7 @@
                                     </div>
                                     <div>
                                         <strong className="text-white">バネ系</strong>
-                                        <p>東大入試モデル。AがBに衝突し、e=0のときは合体してB-C間のバネで振動します。Symplectic積分法によりエネルギーが長時間保存されます。</p>
+                                        <p>東大入試モデル。AがBに衝突し、e=0のときは合体してB-C間のバネで振動します。CM系としたとき、ばねは対照的な振動になっている点をグラフから確認してください。</p>
                                     </div>
                                     <div className="pt-2 border-t border-slate-700 text-xs">
                                         <strong className="text-yellow-400">+ マーク</strong>: 重心位置<br />
